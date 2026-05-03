@@ -1,0 +1,397 @@
+From c77915057d86af27d611576fe425494a1879da42 Mon Sep 17 00:00:00 2001
+From: PoojithaYN <cs23b043@iittp.ac.in>
+Date: Sun, 3 May 2026 07:00:27 +0530
+Subject: [PATCH] Added pipe and demand paging
+
+---
+ .../code/userprog/addrspace.cc                | 84 +++++++++++-----
+ .../code/userprog/addrspace.h                 |  8 +-
+ .../code/userprog/exception.cc                | 99 ++++++++++++++++++-
+ .../code/userprog/ksyscall.h                  | 23 +++++
+ nachos-project-master/code/userprog/noff.h    |  6 +-
+ nachos-project-master/code/userprog/syscall.h | 21 ++++
+ 6 files changed, 213 insertions(+), 28 deletions(-)
+
+diff --git a/nachos-project-master/code/userprog/addrspace.cc b/nachos-project-master/code/userprog/addrspace.cc
+index 0002d39..b8990c0 100644
+--- a/nachos-project-master/code/userprog/addrspace.cc
++++ b/nachos-project-master/code/userprog/addrspace.cc
+@@ -84,10 +84,15 @@ AddrSpace::AddrSpace() {
+ //----------------------------------------------------------------------
+ 
+ AddrSpace::~AddrSpace() {
+-    int i;
+-    for (i = 0; i < numPages; i++) {
+-        kernel->gPhysPageBitMap->Clear(pageTable[i].physicalPage);
+-    }
++for (int i = 0; i < numPages; i++) {
++        if(pageTable[i].valid == TRUE) {
++            kernel->gPhysPageBitMap->Clear(pageTable[i].physicalPage);
++        }
++     }
++    delete executable;
++
++
++
+     delete[] pageTable;
+ }
+ 
+@@ -148,9 +153,9 @@ AddrSpace::AddrSpace(char *fileName) {
+     pageTable = new TranslationEntry[numPages];
+     for (i = 0; i < numPages; i++) {
+         pageTable[i].virtualPage = i;  // for now, virtual page # = phys page #
+-        pageTable[i].physicalPage = kernel->gPhysPageBitMap->FindAndSet();
++        pageTable[i].physicalPage = pageTable[i].physicalPage = -1;
+         // cerr << pageTable[i].physicalPage << endl;
+-        pageTable[i].valid = TRUE;
++        pageTable[i].valid = FALSE;
+         pageTable[i].use = FALSE;
+         pageTable[i].dirty = FALSE;
+         pageTable[i].readOnly = FALSE;  // if the code segment was entirely on
+@@ -163,24 +168,26 @@ AddrSpace::AddrSpace(char *fileName) {
+         DEBUG(dbgAddr, "phyPage " << pageTable[i].physicalPage);
+     }
+ 
+-    if (noffH.code.size > 0) {
+-        for (i = 0; i < numPages; i++)
+-            executable->ReadAt(
+-                &(kernel->machine->mainMemory[noffH.code.virtualAddr]) +
+-                    (pageTable[i].physicalPage * PageSize),
+-                PageSize, noffH.code.inFileAddr + (i * PageSize));
+-    }
+-
+-    if (noffH.initData.size > 0) {
+-        for (i = 0; i < numPages; i++)
+-            executable->ReadAt(
+-                &(kernel->machine->mainMemory[noffH.initData.virtualAddr]) +
+-                    (pageTable[i].physicalPage * PageSize),
+-                PageSize, noffH.initData.inFileAddr + (i * PageSize));
+-    }
+-
+-    kernel->addrLock->V();
+-    delete executable;
++    // if (noffH.code.size > 0) {
++    //     for (i = 0; i < numPages; i++)
++    //         executable->ReadAt(
++    //             &(kernel->machine->mainMemory[noffH.code.virtualAddr]) +
++    //                 (pageTable[i].physicalPage * PageSize),
++    //             PageSize, noffH.code.inFileAddr + (i * PageSize));
++    // }
++ 
++
++    // if (noffH.initData.size > 0) {
++    //    for (i = 0; i < numPages; i++)
++    //        executable->ReadAt(
++    //            &(kernel->machine->mainMemory[noffH.initData.virtualAddr]) +
++    //                (pageTable[i].physicalPage * PageSize),
++    //            PageSize, noffH.initData.inFileAddr + (i * PageSize));
++    //}
++
++    exeFileName = fileName;
++    this->executable = executable;
++    this->noffH = noffH;
+     return;
+ }
+ 
+@@ -308,4 +315,33 @@ ExceptionType AddrSpace::Translate(unsigned int vaddr, unsigned int *paddr,
+     //  ", paddr: " << *paddr << "\n";
+ 
+     return NoException;
++
++}
++
++void AddrSpace::LoadPage(int vaddr){
++    int vpn = vaddr / PageSize;
++
++    int codeStart = noffH.code.virtualAddr / PageSize;
++    int codeEnd = (noffH.code.virtualAddr + noffH.code.size - 1) / PageSize;
++    int initDataStart = noffH.initData.virtualAddr / PageSize;
++    int initDataEnd = (noffH.initData.virtualAddr + noffH.initData.size - 1) / PageSize;
++
++    pageTable[vpn].physicalPage = kernel->gPhysPageBitMap->FindAndSet();
++    ASSERT(pageTable[vpn].physicalPage >= 0);
++
++    bzero(&(kernel->machine->mainMemory[pageTable[vpn].physicalPage * PageSize]), PageSize);
++
++    if(vpn >= codeStart && vpn <= codeEnd){
++        cout << "Loading code page " << vpn << "\n";
++        executable->ReadAt(&kernel->machine->mainMemory[(pageTable[vpn].physicalPage) * PageSize], PageSize, noffH.code.inFileAddr + (vpn - codeStart) * PageSize);
++    } else if (vpn >= initDataStart && vpn <= initDataEnd) {
++        cout << "Loading Data Segment for Virtual Page: " << vpn << endl;
++        executable->ReadAt(
++            &kernel->machine->mainMemory[(pageTable[vpn].physicalPage * PageSize)],
++            PageSize,
++            noffH.initData.inFileAddr + ((vpn - initDataStart) * PageSize)
++        );
++    }
++
++    pageTable[vpn].valid = TRUE;
+ }
+diff --git a/nachos-project-master/code/userprog/addrspace.h b/nachos-project-master/code/userprog/addrspace.h
+index eb40a1a..12b1cfd 100644
+--- a/nachos-project-master/code/userprog/addrspace.h
++++ b/nachos-project-master/code/userprog/addrspace.h
+@@ -15,7 +15,7 @@
+ 
+ #include "copyright.h"
+ #include "filesys.h"
+-
++#include "noff.h"
+ #define UserStackSize 1024  // increase this as necessary!
+ 
+ class AddrSpace {
+@@ -31,7 +31,7 @@ class AddrSpace {
+ 
+     void SaveState();     // Save/restore address space-specific
+     void RestoreState();  // info on a context switch
+-
++    void LoadPage(int vaddr);
+     // Translate virtual address _vaddr_
+     // to physical address _paddr_. _mode_
+     // is 0 for Read, 1 for Write.
+@@ -42,6 +42,10 @@ class AddrSpace {
+                                   // for now!
+     unsigned int numPages;        // Number of pages in the virtual
+                                   // address space
++    char* exeFileName;
++    NoffHeader noffH;
++    OpenFile* executable;
++
+ 
+     void InitRegisters();  // Initialize user-level CPU registers,
+                            // before jumping to user code
+diff --git a/nachos-project-master/code/userprog/exception.cc b/nachos-project-master/code/userprog/exception.cc
+index 685ca92..9245779 100644
+--- a/nachos-project-master/code/userprog/exception.cc
++++ b/nachos-project-master/code/userprog/exception.cc
+@@ -327,7 +327,6 @@ void handle_SC_Exec() {
+         kernel->machine->WriteRegister(2, -1);
+         return move_program_counter();
+     }
+-
+     kernel->machine->WriteRegister(2, SysExec(name));
+     // DO NOT DELETE NAME, THE THEARD WILL DELETE IT LATER
+     // delete[] name;
+@@ -335,6 +334,85 @@ void handle_SC_Exec() {
+     return move_program_counter();
+ }
+ 
++
++void handle_SC_Pipe(){
++    int firstptr = kernel->machine->ReadRegister(4);
++    int secondptr = kernel->machine->ReadRegister(5);
++
++    int parentFd = -1;
++    int childFd = -1;
++
++    kernel->machine->WriteRegister(2, SysPipe(&parentFd, &childFd));
++    kernel->machine->WriteMem(firstptr, sizeof(int), parentFd);
++    kernel->machine->WriteMem(secondptr, sizeof(int), childFd);
++    return move_program_counter();
++}
++
++void handle_SC_PipeRead(){
++    int desNum = kernel->machine->ReadRegister(4);
++    int bufAdr = kernel->machine->ReadRegister(5);
++    int nBytes = kernel->machine->ReadRegister(6);
++
++    char* buff = new char[nBytes+1];
++    int readRes = kernel->pipeDes->readDes(desNum,buff,nBytes);
++    buff[readRes] = '\0';
++    
++    StringSys2User(buff, bufAdr, nBytes+1);
++    delete[] buff;
++    return move_program_counter();
++}
++
++void handle_SC_PipeWrite(){
++    int desNum = kernel->machine->ReadRegister(4);
++    int bufAdr = kernel->machine->ReadRegister(5);
++    int nBytes = kernel->machine->ReadRegister(6);
++
++    char* buff = new char[nBytes+1];
++    for(int i = 0; i < nBytes; i++){
++        int oneChar;
++        kernel->machine->ReadMem(bufAdr + i, 1, &oneChar);
++        buff[i] = (unsigned char)oneChar;
++    }
++
++    int writeRes = kernel->pipeDes->writeDes(desNum,buff,nBytes);
++    delete[] buff;
++    return move_program_counter();
++}
++
++void handle_SC_ExecP(){
++    int virtAddr = kernel->machine->ReadRegister(4);
++    char* name = stringUser2System(virtAddr);
++    if(name == NULL) {
++        kernel->machine->WriteRegister(2, -1);
++        return move_program_counter();
++    }
++
++    int pDes = kernel->machine->ReadRegister(5);
++    kernel->machine->WriteRegister(2, SysExecP(name,pDes));
++    delete[] name;
++    return move_program_counter();
++}
++
++void handle_SC_GetPD(){
++    int pd = SysGetPD();
++    kernel->machine->WriteRegister(2, pd);
++    return move_program_counter();
++}
++
++void handle_SC_ReadInt() {
++    int virtAddr = kernel->machine->ReadRegister(4);
++    char* buf = stringUser2System(virtAddr);
++    int value;
++    memcpy(&value, buf, 4);
++    kernel->machine->WriteRegister(2, (int) value);
++    delete[] buf;
++    return move_program_counter();
++}
++
++
++
++
++
+ /**
+  * @brief handle System Call Join
+  * @param id: thread id (get from R4)
+@@ -427,6 +505,13 @@ void ExceptionHandler(ExceptionType which) {
+             DEBUG(dbgSys, "Switch to system mode\n");
+             break;
+         case PageFaultException:
++        {
++            int faultingAddr = kernel->machine->ReadRegister(BadVAddrReg);
++            cout << "### Page fault at address: " << faultingAddr << " ###" << endl;
++            kernel->currentThread->space->LoadPage(faultingAddr);
++            kernel->currentThread->space->RestoreState();
++            return;
++        }
+         case ReadOnlyException:
+         case BusErrorException:
+         case AddressErrorException:
+@@ -447,6 +532,18 @@ void ExceptionHandler(ExceptionType which) {
+                     return handle_SC_Abs();
+                 case SC_Sleep:
+                     return handle_SC_Sleep();
++                case SC_ExecP:
++                    return handle_SC_ExecP();
++                case SC_Pipe:
++                    return handle_SC_Pipe();
++                case SC_PipeRead:
++                    return handle_SC_PipeRead();
++                case SC_PipeWrite:
++                    return handle_SC_PipeWrite();
++                case SC_GetPD:
++                    return handle_SC_GetPD();
++                case SC_ReadInt:
++                    return handle_SC_ReadInt();
+                 case SC_ReadNum:
+                     return handle_SC_ReadNum();
+                 case SC_PrintNum:
+diff --git a/nachos-project-master/code/userprog/ksyscall.h b/nachos-project-master/code/userprog/ksyscall.h
+index f041ce6..1417c3f 100644
+--- a/nachos-project-master/code/userprog/ksyscall.h
++++ b/nachos-project-master/code/userprog/ksyscall.h
+@@ -217,6 +217,29 @@ int SysExec(char* name) {
+     return kernel->pTab->ExecUpdate(name);
+ }
+ 
++
++int SysExecP(char* name,int pDes) {
++    OpenFile* ofile = kernel->fileSystem->Open(name);
++    if(ofile == NULL) {
++        DEBUG(dbgSys, "\nExec:: Can't open this file.");
++        return -1;
++    }
++
++    delete ofile;
++    return kernel->pTab->ExecUpdate(name,pDes);
++}
++
++int SysPipe(int* x,int*y){
++    int result = kernel->pipeDes->createDes(x,y,"pipe");
++    return result;
++}
++
++int SysGetPD(){
++    return kernel->currentThread->pipeDesNum;
++}
++
++
++
+ int SysJoin(int id) { return kernel->pTab->JoinUpdate(id); }
+ 
+ int SysExit(int id) { return kernel->pTab->ExitUpdate(id); }
+diff --git a/nachos-project-master/code/userprog/noff.h b/nachos-project-master/code/userprog/noff.h
+index 817e506..e617793 100644
+--- a/nachos-project-master/code/userprog/noff.h
++++ b/nachos-project-master/code/userprog/noff.h
+@@ -4,7 +4,9 @@
+  *     Basically, we only know about three types of segments:
+  *	code (read-only), initialized data, and unitialized data
+  */
+-
++#ifndef NOFF_H
++#define NOFF_H
++ 
+ #define NOFFMAGIC                            \
+     0xbadfad /* magic number denoting Nachos \
+               * object code file             \
+@@ -27,3 +29,5 @@ typedef struct noffHeader {
+                          * should be zero'ed before use
+                          */
+ } NoffHeader;
++
++#endif 
+diff --git a/nachos-project-master/code/userprog/syscall.h b/nachos-project-master/code/userprog/syscall.h
+index 40485d6..a7546a8 100644
+--- a/nachos-project-master/code/userprog/syscall.h
++++ b/nachos-project-master/code/userprog/syscall.h
+@@ -50,6 +50,13 @@
+ #define SC_GetPid 54
+ #define SC_Abs 55
+ #define SC_Sleep 56
++#define SC_Pipe 57
++#define SC_PipeRead 58
++#define SC_PipeWrite 59
++#define SC_ExecP 60
++#define SC_ReadInt 61
++#define SC_GetPD 62
++
+ #ifndef IN_ASM
+ 
+ /* The system call interface.  These are the operations the Nachos
+@@ -63,6 +70,10 @@
+  */
+ 
+ /* Stop Nachos, and print out performance stats */
++int GetPD();
++
++int ReadInt(char* buffer);
++
+ void Halt();
+ 
+ /*
+@@ -105,6 +116,16 @@ SpaceId Exec(char *exec_name);
+  * parameters stored in argv[1..argc-1] and return the
+  * address space identifier
+  */
++
++
++SpaceId ExecP(char *exec_name, int pDes);
++
++void Pipe(int* x, int* y);
++
++int pipeRead(int desNum, char* buffer, int charCount);
++
++int pipeWrite(int desNum, char* buffer, int charCount);
++
+ SpaceId ExecV(int argc, char *argv[]);
+ 
+ /* Only return once the user program "id" has finished.
+-- 
+2.48.1
+
