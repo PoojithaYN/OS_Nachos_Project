@@ -327,13 +327,91 @@ void handle_SC_Exec() {
         kernel->machine->WriteRegister(2, -1);
         return move_program_counter();
     }
-
     kernel->machine->WriteRegister(2, SysExec(name));
     // DO NOT DELETE NAME, THE THEARD WILL DELETE IT LATER
     // delete[] name;
 
     return move_program_counter();
 }
+
+
+void handle_SC_Pipe(){
+    int firstptr = kernel->machine->ReadRegister(4);
+    int secondptr = kernel->machine->ReadRegister(5);
+
+    int parentFd = -1;
+    int childFd = -1;
+
+    kernel->machine->WriteRegister(2, SysPipe(&parentFd, &childFd));
+    kernel->machine->WriteMem(firstptr, sizeof(int), parentFd);
+    kernel->machine->WriteMem(secondptr, sizeof(int), childFd);
+    return move_program_counter();
+}
+
+void handle_SC_PipeRead(){
+    int desNum = kernel->machine->ReadRegister(4);
+    int bufAdr = kernel->machine->ReadRegister(5);
+    int nBytes = kernel->machine->ReadRegister(6);
+
+    char* buff = new char[nBytes+1];
+    int readRes = kernel->pipeDes->readDes(desNum,buff,nBytes);
+    buff[readRes] = '\0';
+    
+    StringSys2User(buff, bufAdr, nBytes+1);
+    delete[] buff;
+    return move_program_counter();
+}
+
+void handle_SC_PipeWrite(){
+    int desNum = kernel->machine->ReadRegister(4);
+    int bufAdr = kernel->machine->ReadRegister(5);
+    int nBytes = kernel->machine->ReadRegister(6);
+
+    char* buff = new char[nBytes+1];
+    for(int i = 0; i < nBytes; i++){
+        int oneChar;
+        kernel->machine->ReadMem(bufAdr + i, 1, &oneChar);
+        buff[i] = (unsigned char)oneChar;
+    }
+
+    int writeRes = kernel->pipeDes->writeDes(desNum,buff,nBytes);
+    delete[] buff;
+    return move_program_counter();
+}
+
+void handle_SC_ExecP(){
+    int virtAddr = kernel->machine->ReadRegister(4);
+    char* name = stringUser2System(virtAddr);
+    if(name == NULL) {
+        kernel->machine->WriteRegister(2, -1);
+        return move_program_counter();
+    }
+
+    int pDes = kernel->machine->ReadRegister(5);
+    kernel->machine->WriteRegister(2, SysExecP(name,pDes));
+    delete[] name;
+    return move_program_counter();
+}
+
+void handle_SC_GetPD(){
+    int pd = SysGetPD();
+    kernel->machine->WriteRegister(2, pd);
+    return move_program_counter();
+}
+
+void handle_SC_ReadInt() {
+    int virtAddr = kernel->machine->ReadRegister(4);
+    char* buf = stringUser2System(virtAddr);
+    int value;
+    memcpy(&value, buf, 4);
+    kernel->machine->WriteRegister(2, (int) value);
+    delete[] buf;
+    return move_program_counter();
+}
+
+
+
+
 
 /**
  * @brief handle System Call Join
@@ -427,6 +505,13 @@ void ExceptionHandler(ExceptionType which) {
             DEBUG(dbgSys, "Switch to system mode\n");
             break;
         case PageFaultException:
+        {
+            int faultingAddr = kernel->machine->ReadRegister(BadVAddrReg);
+            cout << "### Page fault at address: " << faultingAddr << " ###" << endl;
+            kernel->currentThread->space->LoadPage(faultingAddr);
+            kernel->currentThread->space->RestoreState();
+            return;
+        }
         case ReadOnlyException:
         case BusErrorException:
         case AddressErrorException:
@@ -447,6 +532,18 @@ void ExceptionHandler(ExceptionType which) {
                     return handle_SC_Abs();
                 case SC_Sleep:
                     return handle_SC_Sleep();
+                case SC_ExecP:
+                    return handle_SC_ExecP();
+                case SC_Pipe:
+                    return handle_SC_Pipe();
+                case SC_PipeRead:
+                    return handle_SC_PipeRead();
+                case SC_PipeWrite:
+                    return handle_SC_PipeWrite();
+                case SC_GetPD:
+                    return handle_SC_GetPD();
+                case SC_ReadInt:
+                    return handle_SC_ReadInt();
                 case SC_ReadNum:
                     return handle_SC_ReadNum();
                 case SC_PrintNum:

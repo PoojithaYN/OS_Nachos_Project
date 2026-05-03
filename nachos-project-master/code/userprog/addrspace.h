@@ -15,7 +15,7 @@
 
 #include "copyright.h"
 #include "filesys.h"
-
+#include "noff.h"
 #define UserStackSize 1024  // increase this as necessary!
 
 class AddrSpace {
@@ -31,7 +31,7 @@ class AddrSpace {
 
     void SaveState();     // Save/restore address space-specific
     void RestoreState();  // info on a context switch
-
+    void LoadPage(int vaddr);
     // Translate virtual address _vaddr_
     // to physical address _paddr_. _mode_
     // is 0 for Read, 1 for Write.
@@ -42,6 +42,10 @@ class AddrSpace {
                                   // for now!
     unsigned int numPages;        // Number of pages in the virtual
                                   // address space
+    char* exeFileName;
+    NoffHeader noffH;
+    OpenFile* executable;
+
 
     void InitRegisters();  // Initialize user-level CPU registers,
                            // before jumping to user code
